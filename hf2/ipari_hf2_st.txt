@@ -1,0 +1,155 @@
+(* Sebők Bence K3VH3H *)
+PROGRAM PLC_PRG
+(* Bemeneti fizikai változók *)
+VAR_INPUT
+ProxyMain AT %I0.0: BOOL; (* központi futószalag közelítésérzékelője *)
+ProxyA AT %I0.1: BOOL;    (* A töltőgép közelítésérzékelője *)
+LevelA AT %I0.2: BOOL;    (* A töltőgép szintérzékelője *)
+AckA AT %I0.3: BOOL;      (* A töltőgép nyugtázó nyomógombja *)
+ProxyB AT %I0.4: BOOL;    (* B töltőgép közelítésérzékelője *)
+LevelB AT %I0.5: BOOL;    (* B töltőgép szintérzékelője *)
+AckB AT %I0.6: BOOL;      (* B töltőgép nyugtázó nyomógombja *)
+Start: BOOL;
+END_VAR
+
+(* Kimeneti fizikai változók *)
+VAR_OUTPUT
+ConvMain AT %Q0.0: BOOL;  (* Központi futószalag működtetése *)
+Diverter AT %Q0.1: BOOL;  (* Terelő helyzetének beállítása *) (* FALSE -> A; TRUE -> B *)
+ConvA AT %Q0.2: BOOL;     (* A töltőgép futószalagjának működtetése *)
+NozzleA AT %Q0.3: BOOL;   (* A töltőgép fúvókájának nyitása *)
+AlarmA AT %Q0.4: BOOL;    (* A töltőgép hibajelző toronylámpája *)
+ConvB AT %Q0.5: BOOL;     (* B töltőgép futószalagjának működtetése *)
+NozzleB AT %Q0.6: BOOL;   (* B töltőgép fúvókájának nyitása *)
+AlarmB AT %Q0.7: BOOL;    (* B töltőgép hibajelző toronylámpája *)
+END_VAR
+
+(* Egyéb változók *)
+VAR
+SystemState: (Idle, Mozog, Tovabb_A, Tovabb_B) := Idle;
+A_Idle: BOOL := TRUE; (* A folyamat indulásakor üresek a gépek *)
+B_Idle: BOOL := TRUE; (* A folyamat indulásakor üresek a gépek *)
+Toltogep_A: Toltogep;
+Toltogep_B: Toltogep;
+rStart: R_TRIG;
+END_VAR
+
+(* Fő állapotgép *)
+CASE SystemState OF
+    Idle:
+        IF A_Idle OR B_Idle OR rStart.Q THEN
+            SystemState := Mozog;
+        END_IF;
+    Mozog:
+        IF ProxyMain AND A_Idle THEN
+            SystemState := Tovabb_A;
+        END_IF;
+        IF ProxyMain AND B_Idle THEN
+            SystemState := Tovabb_B;
+        END_IF;
+    Tovabb_A:
+        Toltogep_A(UjDoboz:=TRUE,Proxy:=ProxyA,Level:=LevelA,Ack:=AckA,Szabad=>A_Idle);
+        IF NOT ProxyMain THEN
+            SystemState := Idle;
+        ELSE
+            SystemState := Mozog;
+        END_IF;
+    Tovabb_B:
+        Toltogep_B(UjDoboz:=TRUE,Proxy:=ProxyB,Level:=LevelB,Ack:=AckB,Szabad=>B_Idle);
+        IF NOT ProxyMain THEN
+            SystemState := Idle;
+        ELSE
+            SystemState := Mozog;
+        END_IF;
+END_CASE;
+
+(* Kimenetek állítása *)
+(* A kimeneti változókhoz egy logikai kifejezés eredményét rendeljük minden ciklusban. (28. dia) *)
+ConvMain := NOT(SystemState=Idle); (* Idle állapoton kívül minden más állapotban mozog a fő szalag *)
+Diverter := (SystemState=Tovabb_B); (* Ha Tovabb_A, akkor Diverter 0; ha Tovabb_B, akkor Diverter 1 *)
+(* Funkcióblokkok meghívása minden ciklusban *)
+rStart(IN:=Start);
+Toltogep_A(Proxy:=ProxyA,Level:=LevelA,Ack:=AckA,Szabad=>A_Idle);
+Toltogep_B(Proxy:=ProxyB,Level:=LevelB,Ack:=AckB,Szabad=>B_Idle);
+
+(* ********************************************************** *)
+(* ********************************************************** *)
+(* ********************************************************** *)
+
+(* Töltőgép funkcióblokk *)
+FUNCTION_BLOCK Toltogep
+
+(* Bemeneti változók *)
+VAR_INPUT
+    UjDoboz: BOOL; (* új doboz érkezését jelző logikai bemenet *)
+    Proxy: BOOL;   (* közelítésérzékelő *)
+    Level: BOOL;   (* szintérzékelő *)
+    Ack: BOOL;     (* nyugtázó nyomógomb *)
+END_VAR
+
+(* Kimeneti változók *)
+VAR_OUTPUT
+    Conv: BOOL;   (* szalag )
+    Nozzle: BOOL; (* fúvóka *)
+    Alarm: BOOL;  (*  hibajelző toronylámpa *)
+    Szabad: BOOL; (* az üresen várakozó állapotot jelző logikai kimenet *)
+    (* Szabad értéke TRUE, ha új doboz fogadására készen áll a töltőgép *)
+END_VAR
+
+(* Egyéb változók *)
+VAR
+    (* Töltőgép állapotai *)
+    ToltogepState : (Idle, Betarolas, Toltes, Kitarolas, Hiba) := Idle;
+    (* Időzítők *)
+    Gombnyomas: R_TRIG; (* Nyugtázó nyomógomb felfutó élére menjünk át Idle állapotba *)
+    HibaE: TON;
+    (* Kitarolas állapotban 3 mp elteltével Idle vagy Betarolas állapotba kell menni *)
+    Meg3mp: TP;
+    HogyanTovabb: TON;
+    VanEUj: F_TRIG;
+    Meg3mp: TP;
+END_VAR
+
+(* Töltőgép állapotgépe *)
+CASE ToltogepState OF
+    Idle:
+        IF UjDoboz THEN
+            ToltogepState := Betarolas;
+        END_IF;
+    Betarolas:
+        IF Proxy THEN
+            ToltogepState := Toltes;
+        END_IF;
+    Toltes:
+        IF Level THEN
+            ToltogepState := Kitarolas;
+        END_IF;
+        IF HibaE.Q THEN
+            ToltogepState := Hiba;
+        END_IF;
+    Kitarolas:
+        IF VanEUj.Q AND UjDoboz THEN
+            ToltogepState := Betarolas;
+        END_IF;
+        IF VanEUj.Q AND NOT(UjDoboz) THEN
+            ToltogepState := Idle;
+        END_IF;
+    Hiba:
+        IF Gombnyomas.Q THEN
+            ToltogepState := Idle;
+        END_IF;
+END_CASE
+
+(* Kimenetek állítása *)
+(* A kimeneti változókhoz egy logikai kifejezés eredményét rendeljük minden ciklusban. (28. dia) *)
+Conv := (ToltogepState = Betarolas OR ToltogepState = Kitarolas OR Meg3mp.Q);
+Nozzle := (ToltogepState = Toltes);
+Alarm := (ToltogepState = Hiba);
+Szabad := (ToltogepState = Idle OR ToltogepState = Kitarolas);
+
+(* NOT Level ??? *)
+Meg3mp(IN:=Level,PT:=T#3s);
+VanEUj(CLK:=Meg3mp.Q);
+Gombnyomas(CLK:=Ack); (* Nyugtázó nyomógomb felfutó élére menjünk át Idle állapotba *)
+HibaE(IN:=Nozzle, PT:=T#10s); (* Ha Toltes állapotban (Nozzle üzemel) 10 mp elteltével a Level 0, akkor hiba van *)
+HogyanTovabb(IN:=Level, PT:=T#3s) (* Kitarolas állapotban 3 mp elteltével Idle vagy Betarolas állapotba kell menni *)
